@@ -15,6 +15,9 @@ import {
 } from "./config.mjs";
 
 const REQUEST_TIMEOUT_MS = Number(process.env.REQUEST_TIMEOUT_MS ?? 35_000);
+const BOOKING_REQUEST_TIMEOUT_MS = Number(
+  process.env.BOOKING_REQUEST_TIMEOUT_MS ?? 15_000,
+);
 const DRY_RUN = process.env.DRY_RUN === "1";
 const execFileAsync = promisify(execFile);
 const USER_AGENT =
@@ -301,7 +304,10 @@ function guestUrlFromHtml(html, baseUrl) {
 }
 
 async function curlHtml(url, cookieFile, outputFile, referer) {
-  const timeoutSeconds = Math.max(10, Math.ceil(REQUEST_TIMEOUT_MS / 1000));
+  const timeoutSeconds = Math.max(
+    10,
+    Math.ceil(BOOKING_REQUEST_TIMEOUT_MS / 1000),
+  );
   const args = [
     "--silent",
     "--show-error",
@@ -332,10 +338,22 @@ async function curlHtml(url, cookieFile, outputFile, referer) {
   args.push(url);
   try {
     await execFileAsync("curl", args, {
-      timeout: REQUEST_TIMEOUT_MS + 10_000,
+      timeout: BOOKING_REQUEST_TIMEOUT_MS + 10_000,
       maxBuffer: 2 * 1024 * 1024,
     });
   } catch (error) {
+    try {
+      const partialHtml = await readFile(outputFile, "utf8");
+      if (
+        /name=["']seat["']/i.test(partialHtml) ||
+        partialHtml.includes("/seats/fetch")
+      ) {
+        return partialHtml;
+      }
+    } catch {
+      // Fall through to the detailed request error below.
+    }
+
     const detail = String(error?.stderr || error?.message || "unknown curl error")
       .replace(/\s+/g, " ")
       .slice(0, 180);
