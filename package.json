@@ -1,0 +1,17 @@
+{
+  "name": "vox-ticket-watcher",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Read-only VOX Cinemas seat availability watcher for City Centre Almaza.",
+  "scripts": {
+    "check": "node src/checker.mjs",
+    "check:dry": "DRY_RUN=1 node src/checker.mjs"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "playwright": "1.62.1"
+  }
+}
