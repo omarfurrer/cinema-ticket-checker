@@ -683,6 +683,7 @@ async function sendTelegram(message, { silent }) {
 async function main() {
   const todayKey = cairoDateKey();
   let listingBrowser;
+  let bookingBrowser;
   let listingContext;
   let report = {
     dates: [],
@@ -705,8 +706,16 @@ async function main() {
     const dates = await discoverDatePages(listingPage, todayKey);
     const { eligible, errors: showtimeErrors } =
       await collectEligibleShowtimes(listingPage, dates);
+    await listingContext.close();
+    listingContext = null;
+    await listingBrowser.close();
+    listingBrowser = null;
+    bookingBrowser = await chromium.launch({
+      headless: true,
+      args: ["--disable-dev-shm-usage", "--disable-http2"],
+    });
     const { results, errors: seatErrors } = await inspectEligibleShowtimes(
-      listingBrowser,
+      bookingBrowser,
       eligible,
       showtimeErrors,
     );
@@ -720,6 +729,9 @@ async function main() {
     }
     if (listingBrowser) {
       await listingBrowser.close();
+    }
+    if (bookingBrowser) {
+      await bookingBrowser.close();
     }
   }
 
