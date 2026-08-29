@@ -307,6 +307,7 @@ async function curlHtml(url, cookieFile, outputFile, referer) {
     "--show-error",
     "--location",
     "--compressed",
+    "--http1.1",
     "--max-time",
     String(timeoutSeconds),
     "--connect-timeout",
@@ -329,10 +330,17 @@ async function curlHtml(url, cookieFile, outputFile, referer) {
   }
 
   args.push(url);
-  await execFileAsync("curl", args, {
-    timeout: REQUEST_TIMEOUT_MS + 10_000,
-    maxBuffer: 2 * 1024 * 1024,
-  });
+  try {
+    await execFileAsync("curl", args, {
+      timeout: REQUEST_TIMEOUT_MS + 10_000,
+      maxBuffer: 2 * 1024 * 1024,
+    });
+  } catch (error) {
+    const detail = String(error?.stderr || error?.message || "unknown curl error")
+      .replace(/\s+/g, " ")
+      .slice(0, 180);
+    throw new Error(`VOX booking request failed: ${detail}`);
+  }
   return readFile(outputFile, "utf8");
 }
 
