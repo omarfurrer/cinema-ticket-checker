@@ -1,7 +1,6 @@
 name: Check VOX seat availability
 
 on:
-  push:
   schedule:
     - cron: "*/5 * * * *"
   workflow_dispatch:
@@ -11,7 +10,7 @@ permissions:
 
 concurrency:
   group: vox-seat-check
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 jobs:
   check:
