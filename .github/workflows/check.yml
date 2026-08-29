@@ -9,7 +9,7 @@ permissions:
 
 concurrency:
   group: vox-seat-check
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 jobs:
   check:
