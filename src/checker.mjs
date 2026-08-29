@@ -320,11 +320,33 @@ function readSeatLabelsFromHtml(html) {
   return records;
 }
 
-function guestUrlFromHtml(html, baseUrl) {
+function seatFetchUrlFromHtml(html, baseUrl) {
   const link = html.match(
-    /<a\b[^>]*href=["']([^"']*\/seats\/fetch[^"']*)["'][^>]*>[\s\S]*?Continue\s+as\s+Guest/i,
+    /(?:href|action)=["']([^"']*\/seats\/fetch[^"']*)["']/i,
   );
   return link ? new URL(decodeHtml(link[1]), baseUrl).href : null;
+}
+
+function bookingBaseUrl(value) {
+  const url = new URL(value);
+  url.pathname = url.pathname
+    .replace(/\/guest(?:\/processing)?\/?$/i, "")
+    .replace(/\/+$/, "");
+  url.hash = "";
+  return url;
+}
+
+function guestPageUrlFromBooking(value) {
+  const url = bookingBaseUrl(value);
+  url.pathname += "/guest";
+  return url.href;
+}
+
+function seatFetchUrlFromBooking(value) {
+  const url = bookingBaseUrl(value);
+  url.pathname += "/seats/fetch";
+  url.hash = "seats";
+  return url.href;
 }
 
 async function fileExists(path) {
@@ -341,6 +363,8 @@ async function curlHtml(url, cookieFile, outputFile, referer) {
   const args = [
     "--silent",
     "--show-error",
+    "--write-out",
+    "__VOX_EFFECTIVE_URL__%{url_effective}",
     "--location",
     "--compressed",
     "--http1.1",
@@ -365,18 +389,27 @@ async function curlHtml(url, cookieFile, outputFile, referer) {
 
   args.push(url);
   try {
-    await execFileAsync("curl", args, {
+    const result = await execFileAsync("curl", args, {
       timeout: BOOKING_REQUEST_TIMEOUT_MS + 10_000,
       maxBuffer: 2 * 1024 * 1024,
     });
+    const effectiveUrl = result.stdout
+      .split("__VOX_EFFECTIVE_URL__")
+      .pop()
+      ?.trim();
+    return {
+      html: await readFile(outputFile, "utf8"),
+      effectiveUrl: effectiveUrl || url,
+    };
   } catch (error) {
     try {
       const partialHtml = await readFile(outputFile, "utf8");
       if (
         /name=["']seat["']/i.test(partialHtml) ||
-        partialHtml.includes("/seats/fetch")
+        partialHtml.includes("/seats/fetch") ||
+        partialHtml.includes("/guest")
       ) {
-        return partialHtml;
+        return { html: partialHtml, effectiveUrl: url };
       }
     } catch {
       // Fall through to the detailed request error below.
@@ -387,7 +420,6 @@ async function curlHtml(url, cookieFile, outputFile, referer) {
       .slice(0, 180);
     throw new Error(`VOX booking request failed: ${detail}`);
   }
-  return readFile(outputFile, "utf8");
 }
 
 async function readBookingSeatLabels(url) {
@@ -398,24 +430,43 @@ async function readBookingSeatLabels(url) {
   const seatsFile = join(workingDirectory, "seats.html");
 
   try {
-    const initialHtml = await curlHtml(
+    const initialResponse = await curlHtml(
       url,
       cookieFile,
       initialFile,
       showtimesUrl().href,
     );
-    const guestUrl = guestUrlFromHtml(initialHtml, url);
-    if (!guestUrl) {
-      throw new Error("The booking page did not expose a guest-seat link");
-    }
-
-    const guestPageUrl = guestUrl.replace(
-      /\/seats\/fetch(?:#.*)?$/i,
-      "/guest",
+    const initialBaseUrl = initialResponse.effectiveUrl || url;
+    const guestPageUrl = guestPageUrlFromBooking(initialBaseUrl);
+    const guestResponse = await curlHtml(
+      guestPageUrl,
+      cookieFile,
+      guestFile,
+      initialBaseUrl,
     );
-    await curlHtml(guestPageUrl, cookieFile, guestFile, url);
-    const seatHtml = await curlHtml(guestUrl, cookieFile, seatsFile, guestPageUrl);
-    return readSeatLabelsFromHtml(seatHtml);
+    const guestBaseUrl = guestResponse.effectiveUrl || guestPageUrl;
+    const guestUrl =
+      seatFetchUrlFromHtml(initialResponse.html, initialBaseUrl) ||
+      seatFetchUrlFromHtml(guestResponse.html, guestBaseUrl) ||
+      seatFetchUrlFromBooking(guestBaseUrl);
+    const seatResponse = await curlHtml(
+      guestUrl,
+      cookieFile,
+      seatsFile,
+      guestBaseUrl,
+    );
+    try {
+      return readSeatLabelsFromHtml(seatResponse.html);
+    } catch (error) {
+      const diagnostics = [
+        "initial=" + initialResponse.html.length + " bytes",
+        "guest=" + guestResponse.html.length + " bytes",
+        "seats=" + seatResponse.html.length + " bytes",
+        "guestUrl=" + guestUrl,
+        "effective=" + (seatResponse.effectiveUrl || "unknown"),
+      ].join(", ");
+      throw new Error(errorMessage(error) + " (" + diagnostics + ")");
+    }
   } finally {
     await rm(workingDirectory, { recursive: true, force: true });
   }
