@@ -467,7 +467,7 @@ async function main() {
   try {
     browser = await chromium.launch({
       headless: true,
-      args: ["--disable-dev-shm-usage"],
+      args: ["--disable-dev-shm-usage", "--disable-http2"],
     });
     listingContext = await browser.newContext({
       locale: "en-US",
