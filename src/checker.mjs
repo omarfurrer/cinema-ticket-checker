@@ -229,52 +229,6 @@ async function collectEligibleShowtimes(page, dates) {
   return { eligible, errors };
 }
 
-async function maybeContinueAsGuest(page) {
-  const guestButton = page.getByText("Continue As Guest", { exact: true }).first();
-  await guestButton.waitFor({ state: "visible", timeout: REQUEST_TIMEOUT_MS });
-  await guestButton.click();
-  await page.waitForSelector('input[name="seat"]', {
-    state: "attached",
-    timeout: REQUEST_TIMEOUT_MS,
-  });
-}
-
-async function maybeAcceptConsent(page) {
-  const agreeLink = page
-    .locator('a[data-dismiss="true"]')
-    .filter({ hasText: /I Agree/i })
-    .first();
-
-  if ((await agreeLink.count()) > 0 && (await agreeLink.isVisible())) {
-    await agreeLink.click();
-    await page.waitForTimeout(300);
-  }
-}
-
-async function readSeatLabels(page) {
-  const seats = page.locator('input[name="seat"]');
-  await seats.first().waitFor({ state: "attached", timeout: REQUEST_TIMEOUT_MS });
-
-  const records = await seats.evaluateAll((inputs) =>
-    inputs
-      .map((input) => ({
-        label: (
-          input.getAttribute("data-label") ??
-          input.getAttribute("value") ??
-          ""
-        ).trim(),
-        available: !input.disabled,
-      }))
-      .filter(({ label }) => label.length > 0),
-  );
-
-  if (records.length === 0) {
-    throw new Error("The booking page returned no labelled seats");
-  }
-
-  return records;
-}
-
 function decodeHtml(value) {
   return value
     .replace(/&amp;/gi, "&")
@@ -472,8 +426,92 @@ async function readBookingSeatLabels(url) {
   }
 }
 
-async function checkSeats(_browser, showtime) {
-  const seats = await readBookingSeatLabels(showtime.bookingUrl);
+async function maybeContinueAsGuest(page) {
+  const seats = page.locator('input[name="seat"]');
+  try {
+    await seats.first().waitFor({
+      state: "attached",
+      timeout: Math.min(5_000, REQUEST_TIMEOUT_MS),
+    });
+    return;
+  } catch {
+    // VOX may first show /guest/processing before rendering the guest link.
+  }
+
+  const guestButton = page.getByText(/Continue\s+as\s+Guest/i).first();
+  await guestButton.waitFor({ state: "visible", timeout: REQUEST_TIMEOUT_MS });
+  await guestButton.click();
+  await seats.first().waitFor({
+    state: "attached",
+    timeout: REQUEST_TIMEOUT_MS,
+  });
+}
+
+async function maybeAcceptConsent(page) {
+  const agreeLink = page
+    .locator('a[data-dismiss="true"]')
+    .filter({ hasText: /I Agree/i })
+    .first();
+
+  if ((await agreeLink.count()) > 0 && (await agreeLink.isVisible())) {
+    await agreeLink.click();
+    await page.waitForTimeout(300);
+  }
+}
+
+async function readSeatLabels(page) {
+  const seats = page.locator('input[name="seat"]');
+  await seats.first().waitFor({ state: "attached", timeout: REQUEST_TIMEOUT_MS });
+
+  const records = await seats.evaluateAll((inputs) =>
+    inputs
+      .map((input) => ({
+        label: (
+          input.getAttribute("data-label") ??
+          input.getAttribute("value") ??
+          ""
+        ).trim(),
+        available: !input.disabled,
+      }))
+      .filter(({ label }) => label.length > 0),
+  );
+
+  if (records.length === 0) {
+    throw new Error("The booking page returned no labelled seats");
+  }
+
+  return records;
+}
+
+async function readBookingSeatLabelsWithBrowser(browser, url) {
+  const context = await browser.newContext({
+    locale: "en-US",
+    timezoneId: CONFIG.timeZone,
+  });
+  const page = await context.newPage();
+
+  try {
+    await page.goto(url, {
+      waitUntil: "commit",
+      timeout: REQUEST_TIMEOUT_MS,
+    });
+    await page.waitForLoadState("domcontentloaded", {
+      timeout: REQUEST_TIMEOUT_MS,
+    }).catch(() => {});
+    await maybeAcceptConsent(page);
+    await maybeContinueAsGuest(page);
+    await maybeAcceptConsent(page);
+    return await readSeatLabels(page);
+  } finally {
+    await context.close();
+  }
+}
+
+async function checkSeats(browser, showtime) {
+  const seats = await readBookingSeatLabelsWithBrowser(
+    browser,
+    showtime.bookingUrl,
+  );
   const availableLabels = new Set(
     seats.filter((seat) => seat.available).map((seat) => seat.label),
   );
@@ -644,7 +682,8 @@ async function sendTelegram(message, { silent }) {
 
 async function main() {
   const todayKey = cairoDateKey();
-  let browser;
+  let listingBrowser;
+  let bookingBrowser;
   let listingContext;
   let report = {
     dates: [],
@@ -654,11 +693,15 @@ async function main() {
   };
 
   try {
-    browser = await chromium.launch({
+    listingBrowser = await chromium.launch({
       headless: true,
       args: ["--disable-dev-shm-usage"],
     });
-    listingContext = await browser.newContext({
+    bookingBrowser = await chromium.launch({
+      headless: true,
+      args: ["--disable-dev-shm-usage", "--disable-http2"],
+    });
+    listingContext = await listingBrowser.newContext({
       locale: "en-US",
       timezoneId: CONFIG.timeZone,
       userAgent: USER_AGENT,
@@ -668,7 +711,7 @@ async function main() {
     const { eligible, errors: showtimeErrors } =
       await collectEligibleShowtimes(listingPage, dates);
     const { results, errors: seatErrors } = await inspectEligibleShowtimes(
-      browser,
+      bookingBrowser,
       eligible,
       showtimeErrors,
     );
@@ -680,8 +723,11 @@ async function main() {
     if (listingContext) {
       await listingContext.close();
     }
-    if (browser) {
-      await browser.close();
+    if (listingBrowser) {
+      await listingBrowser.close();
+    }
+    if (bookingBrowser) {
+      await bookingBrowser.close();
     }
   }
 
