@@ -318,8 +318,6 @@ async function curlHtml(url, cookieFile, outputFile, referer) {
     String(timeoutSeconds),
     "--connect-timeout",
     String(timeoutSeconds),
-    "--user-agent",
-    USER_AGENT,
     "--header",
     "accept: text/html,application/xhtml+xml",
     "--cookie-jar",
@@ -378,7 +376,12 @@ async function readBookingSeatLabels(url) {
   const guestFile = join(workingDirectory, "guest.html");
 
   try {
-    const initialHtml = await curlHtml(url, cookieFile, initialFile);
+    const initialHtml = await curlHtml(
+      url,
+      cookieFile,
+      initialFile,
+      showtimesUrl().href,
+    );
     const guestUrl = guestUrlFromHtml(initialHtml, url);
     const html = guestUrl
       ? await curlHtml(guestUrl, cookieFile, guestFile, url)
