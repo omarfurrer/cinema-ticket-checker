@@ -444,6 +444,11 @@ async function main() {
   const heartbeat = buildHeartbeat(report);
   const alert = buildAvailabilityAlert(report);
 
+  if (report.errors.length > 0) {
+    console.error("VOX checker issues:");
+    console.error(JSON.stringify(report.errors, null, 2));
+  }
+
   await sendTelegram(heartbeat, { silent: true });
   if (alert) {
     await sendTelegram(alert, { silent: false });
