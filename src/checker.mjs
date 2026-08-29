@@ -18,6 +18,7 @@ const REQUEST_TIMEOUT_MS = Number(process.env.REQUEST_TIMEOUT_MS ?? 35_000);
 const BOOKING_REQUEST_TIMEOUT_MS = Number(
   process.env.BOOKING_REQUEST_TIMEOUT_MS ?? 15_000,
 );
+const MAX_SHOWTIMES = Number(process.env.MAX_SHOWTIMES ?? 0);
 const DRY_RUN = process.env.DRY_RUN === "1";
 const execFileAsync = promisify(execFile);
 const USER_AGENT =
@@ -539,8 +540,10 @@ function errorMessage(error) {
 async function inspectEligibleShowtimes(browser, eligible, initialErrors) {
   const results = [];
   const errors = [...initialErrors];
+  const showtimes =
+    MAX_SHOWTIMES > 0 ? eligible.slice(0, MAX_SHOWTIMES) : eligible;
 
-  for (const showtime of eligible) {
+  for (const showtime of showtimes) {
     try {
       results.push(await checkSeats(browser, showtime));
     } catch (error) {
