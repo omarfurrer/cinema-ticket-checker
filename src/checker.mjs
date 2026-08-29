@@ -49,11 +49,58 @@ async function waitForMovieCards(page) {
   });
 }
 
-async function openPage(page, url) {
-  await page.goto(url, {
+function isTransportNavigationError(error) {
+  return /ERR_HTTP2_PROTOCOL_ERROR|ERR_CONNECTION_RESET|ERR_NETWORK_CHANGED/i.test(
+    error instanceof Error ? error.message : String(error),
+  );
+}
+
+function addBaseHref(html, url) {
+  const escapedUrl = url
+    .replace(/&/g, "&amp;")
+    .replace(/"/g, "&quot;");
+  const baseTag = `<base href="${escapedUrl}">`;
+  return /<head\b[^>]*>/i.test(html)
+    ? html.replace(/<head\b[^>]*>/i, (head) => `${head}${baseTag}`)
+    : `${baseTag}${html}`;
+}
+
+async function loadPageWithNodeFetch(page, url) {
+  const response = await fetch(url, {
+    headers: {
+      accept: "text/html,application/xhtml+xml",
+      "user-agent": USER_AGENT,
+    },
+    redirect: "follow",
+  });
+
+  if (!response.ok) {
+    throw new Error(`VOX returned HTTP ${response.status} for ${url}`);
+  }
+
+  const html = await response.text();
+  await page.setContent(addBaseHref(html, url), {
     waitUntil: "domcontentloaded",
     timeout: REQUEST_TIMEOUT_MS,
   });
+}
+
+async function openPage(page, url) {
+  try {
+    await page.goto(url, {
+      waitUntil: "domcontentloaded",
+      timeout: REQUEST_TIMEOUT_MS,
+    });
+  } catch (error) {
+    if (!isTransportNavigationError(error)) {
+      throw error;
+    }
+
+    // Some hosted runners intermittently fail Chromium's HTTP/2 connection
+    // to VOX. Node's fetch client can retrieve the same public HTML, so use
+    // it once as a transport fallback without changing the read-only flow.
+    await loadPageWithNodeFetch(page, url);
+  }
 
   await page.waitForTimeout(700);
 }
