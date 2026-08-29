@@ -518,3 +518,46 @@ async function main() {
   } catch (error) {
     report.errors.push({ stage: "run", message: errorMessage(error) });
   } finally {
+    if (listingContext) {
+      await listingContext.close();
+    }
+    if (listingBrowser) {
+      await listingBrowser.close();
+    }
+  }
+
+  const heartbeat = buildHeartbeat(report);
+  const alert = buildAvailabilityAlert(report);
+
+  if (report.errors.length > 0) {
+    console.error("VOX checker issues:");
+    console.error(JSON.stringify(report.errors, null, 2));
+  }
+
+  await sendTelegram(heartbeat, { silent: true });
+  if (alert) {
+    await sendTelegram(alert, { silent: false });
+  }
+
+  console.log(
+    JSON.stringify(
+      {
+        datesScanned: report.dates.length,
+        eligibleShowtimes: report.eligible.length,
+        checkedShowtimes: report.results.length,
+        matches: report.results.filter((result) => result.availablePairs.length)
+          .length,
+        errors: report.errors.length,
+        dryRun: DRY_RUN,
+      },
+      null,
+      2,
+    ),
+  );
+
+  if (report.errors.length > 0) {
+    process.exitCode = 1;
+  }
+}
+
+await main();
