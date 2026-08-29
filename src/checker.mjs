@@ -1,3 +1,8 @@
+import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import { chromium } from "playwright";
 import {
   cairoDateKey,
@@ -11,6 +16,7 @@ import {
 
 const REQUEST_TIMEOUT_MS = Number(process.env.REQUEST_TIMEOUT_MS ?? 35_000);
 const DRY_RUN = process.env.DRY_RUN === "1";
+const execFileAsync = promisify(execFile);
 const USER_AGENT =
   "vox-ticket-watcher/1.0 (+read-only availability monitoring; no automated booking)";
 
@@ -239,22 +245,46 @@ async function maybeAcceptConsent(page) {
   }
 }
 
-async function readSeatLabels(page) {
-  const seats = page.locator('input[name="seat"]');
-  await seats.first().waitFor({ state: "attached", timeout: REQUEST_TIMEOUT_MS });
+function decodeHtml(value) {
+  return value
+    .replace(/&amp;/gi, "&")
+    .replace(/&quot;/gi, '"')
+    .replace(/&#x27;|&#39;/gi, "'")
+    .replace(/&#x3d;|&#61;/gi, "=");
+}
 
-  const records = await seats.evaluateAll((inputs) =>
-    inputs
-      .map((input) => ({
-        label: (
-          input.getAttribute("data-label") ??
-          input.getAttribute("value") ??
-          ""
-        ).trim(),
-        available: !input.disabled,
-      }))
-      .filter(({ label }) => label.length > 0),
+function htmlAttribute(tag, name) {
+  const escapedName = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const match = tag.match(
+    new RegExp(
+      `\\b${escapedName}\\s*=\\s*(?:"([^"]*)"|'([^']*)'|([^\\s>]+))`,
+      "i",
+    ),
   );
+  return match ? decodeHtml(match[1] ?? match[2] ?? match[3] ?? "") : "";
+}
+
+function hasBooleanHtmlAttribute(tag, name) {
+  const escapedName = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return new RegExp(
+    `\\s${escapedName}(?:\\s*=\\s*(?:"[^"]*"|'[^']*'|[^\\s>]+))?(?=\\s|>)`,
+    "i",
+  ).test(tag);
+}
+
+function readSeatLabelsFromHtml(html) {
+  const records = [...html.matchAll(/<input\b[^>]*>/gi)]
+    .map(([tag]) => {
+      if (htmlAttribute(tag, "name").toLowerCase() !== "seat") {
+        return null;
+      }
+
+      return {
+        label: (htmlAttribute(tag, "data-label") || htmlAttribute(tag, "value")).trim(),
+        available: !hasBooleanHtmlAttribute(tag, "disabled"),
+      };
+    })
+    .filter((record) => record?.label);
 
   if (records.length === 0) {
     throw new Error("The booking page returned no labelled seats");
@@ -263,36 +293,91 @@ async function readSeatLabels(page) {
   return records;
 }
 
-async function checkSeats(browser, showtime) {
-  const context = await browser.newContext({
-    locale: "en-US",
-    timezoneId: CONFIG.timeZone,
-    userAgent: USER_AGENT,
+function guestUrlFromHtml(html, baseUrl) {
+  const link = html.match(
+    /<a\b[^>]*href=["']([^"']*\/seats\/fetch[^"']*)["'][^>]*>[\s\S]*?Continue\s+(?:as|As)\s+Guest/i,
+  );
+  return link ? new URL(decodeHtml(link[1]), baseUrl).href : null;
+}
+
+async function curlHtml(url, cookieFile, outputFile, referer) {
+  const timeoutSeconds = Math.max(10, Math.ceil(REQUEST_TIMEOUT_MS / 1000));
+  const args = [
+    "--silent",
+    "--show-error",
+    "--location",
+    "--compressed",
+    "--max-time",
+    String(timeoutSeconds),
+    "--connect-timeout",
+    String(timeoutSeconds),
+    "--user-agent",
+    USER_AGENT,
+    "--header",
+    "accept: text/html,application/xhtml+xml",
+    "--cookie-jar",
+    cookieFile,
+    "--output",
+    outputFile,
+  ];
+
+  if (referer) {
+    args.push("--referer", referer);
+  }
+  if (await fileExists(cookieFile)) {
+    args.push("--cookie", cookieFile);
+  }
+
+  args.push(url);
+  await execFileAsync("curl", args, {
+    timeout: REQUEST_TIMEOUT_MS + 10_000,
+    maxBuffer: 2 * 1024 * 1024,
   });
-  const page = await context.newPage();
+  return readFile(outputFile, "utf8");
+}
+
+async function fileExists(path) {
+  try {
+    await readFile(path);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function readBookingSeatLabels(url) {
+  const workingDirectory = await mkdtemp(join(tmpdir(), "vox-ticket-watcher-"));
+  const cookieFile = join(workingDirectory, "cookies.txt");
+  const initialFile = join(workingDirectory, "initial.html");
+  const guestFile = join(workingDirectory, "guest.html");
 
   try {
-    await openPage(page, showtime.bookingUrl);
-    await maybeContinueAsGuest(page);
-    await maybeAcceptConsent(page);
-
-    const seats = await readSeatLabels(page);
-    const availableLabels = new Set(
-      seats.filter((seat) => seat.available).map((seat) => seat.label),
-    );
-    const availablePairs = showtime.target.seatGroups.filter((pair) =>
-      pair.every((label) => availableLabels.has(label)),
-    );
-
-    return {
-      ...showtime,
-      status: "ok",
-      seatCount: seats.length,
-      availablePairs,
-    };
+    const initialHtml = await curlHtml(url, cookieFile, initialFile);
+    const guestUrl = guestUrlFromHtml(initialHtml, url);
+    const html = guestUrl
+      ? await curlHtml(guestUrl, cookieFile, guestFile, url)
+      : initialHtml;
+    return readSeatLabelsFromHtml(html);
   } finally {
-    await context.close();
+    await rm(workingDirectory, { recursive: true, force: true });
   }
+}
+
+async function checkSeats(_browser, showtime) {
+  const seats = await readBookingSeatLabels(showtime.bookingUrl);
+  const availableLabels = new Set(
+    seats.filter((seat) => seat.available).map((seat) => seat.label),
+  );
+  const availablePairs = showtime.target.seatGroups.filter((pair) =>
+    pair.every((label) => availableLabels.has(label)),
+  );
+
+  return {
+    ...showtime,
+    status: "ok",
+    seatCount: seats.length,
+    availablePairs,
+  };
 }
 
 function errorMessage(error) {
