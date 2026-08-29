@@ -683,7 +683,6 @@ async function sendTelegram(message, { silent }) {
 async function main() {
   const todayKey = cairoDateKey();
   let listingBrowser;
-  let bookingBrowser;
   let listingContext;
   let report = {
     dates: [],
@@ -697,10 +696,6 @@ async function main() {
       headless: true,
       args: ["--disable-dev-shm-usage"],
     });
-    bookingBrowser = await chromium.launch({
-      headless: true,
-      args: ["--disable-dev-shm-usage", "--disable-http2"],
-    });
     listingContext = await listingBrowser.newContext({
       locale: "en-US",
       timezoneId: CONFIG.timeZone,
@@ -711,7 +706,7 @@ async function main() {
     const { eligible, errors: showtimeErrors } =
       await collectEligibleShowtimes(listingPage, dates);
     const { results, errors: seatErrors } = await inspectEligibleShowtimes(
-      bookingBrowser,
+      listingBrowser,
       eligible,
       showtimeErrors,
     );
@@ -725,9 +720,6 @@ async function main() {
     }
     if (listingBrowser) {
       await listingBrowser.close();
-    }
-    if (bookingBrowser) {
-      await bookingBrowser.close();
     }
   }
 
