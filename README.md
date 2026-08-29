@@ -28,6 +28,10 @@ The seat groups live in `src/config.mjs` so they can be updated without changing
 
 The checker sends a quiet blue `VOX CHECK COMPLETED` message after every run. When one or more preferred pairs are available, it also sends a separate audible `VOX SEATS AVAILABLE` alert with the booking link. Availability alerts repeat while a preferred pair remains available, so a short-lived opening is harder to miss.
 
+## Hosting limitation
+
+The GitHub-hosted runner can discover VOX dates and showtimes, but VOX's booking seat-map request currently does not complete reliably from that runner. Until the checker is moved to a computer or self-hosted runner where the booking flow loads normally, Telegram heartbeats may report a partial check and seat-availability alerts should not be relied on.
+
 ## Local run
 
 ```bash
@@ -41,4 +45,3 @@ DRY_RUN=1 npm run check
 ## GitHub Actions
 
 The workflow runs on a five-minute schedule and can also be started manually from the Actions tab. GitHub may delay scheduled jobs briefly during periods of high load.
-
