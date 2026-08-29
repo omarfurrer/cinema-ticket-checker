@@ -440,7 +440,9 @@ async function maybeContinueAsGuest(page) {
 
   const guestButton = page.getByText(/Continue\s+as\s+Guest/i).first();
   await guestButton.waitFor({ state: "visible", timeout: REQUEST_TIMEOUT_MS });
-  await guestButton.click();
+  // Trigger the normal link navigation without making Playwright wait for
+  // VOX's booking response to finish streaming.
+  await guestButton.evaluate((element) => element.click());
   await seats.first().waitFor({
     state: "attached",
     timeout: REQUEST_TIMEOUT_MS,
