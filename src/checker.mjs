@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { chromium } from "playwright";
+import { chromium, firefox } from "playwright";
 import {
   cairoDateKey,
   CONFIG,
@@ -710,9 +710,8 @@ async function main() {
     listingContext = null;
     await listingBrowser.close();
     listingBrowser = null;
-    bookingBrowser = await chromium.launch({
+    bookingBrowser = await firefox.launch({
       headless: true,
-      args: ["--disable-dev-shm-usage", "--disable-http2"],
     });
     const { results, errors: seatErrors } = await inspectEligibleShowtimes(
       bookingBrowser,
