@@ -30,7 +30,7 @@ The checker sends a quiet blue `VOX CHECK COMPLETED` message after every run. Wh
 
 ## Hosting limitation
 
-The GitHub-hosted runner can discover VOX dates and showtimes, but VOX's booking seat-map request currently does not complete reliably from that runner. Until the checker is moved to a computer or self-hosted runner where the booking flow loads normally, Telegram heartbeats may report a partial check and seat-availability alerts should not be relied on.
+The complete booking flow works locally in headed Google Chrome. GitHub-hosted headed Chrome under Xvfb is still experimental because the runner uses Linux and a datacenter network. Scheduled checks remain paused until repeated manual workflow runs confirm that seat maps load reliably.
 
 ## Local run
 
@@ -50,6 +50,16 @@ BROWSER_CHANNEL=chrome HEADLESS=0 DRY_RUN=1 npm run check
 
 The Chrome window must remain available while the check runs. `BROWSER_USER_AGENT` can optionally override Chrome's normal user-agent, but the default local configuration uses Chrome's own user-agent.
 
+For faster debugging, use `CHECK_TARGET` with a target ID from `src/config.mjs` and `CHECK_LIMIT` to inspect only the first matching showtimes:
+
+```bash
+CHECK_TARGET=the-odyssey-imax CHECK_LIMIT=2 BROWSER_CHANNEL=chrome HEADLESS=1 DRY_RUN=1 npm run check
+```
+
+The output identifies this as a limited probe. Runs without these variables still inspect every eligible showtime.
+
 ## GitHub Actions
 
-The workflow runs on a five-minute schedule and can also be started manually from the Actions tab. GitHub may delay scheduled jobs briefly during periods of high load.
+The workflow currently runs manually from the Actions tab. Its defaults perform a dry two-showtime Odyssey IMAX probe, so no Telegram message is sent. Disable **Check only two Odyssey IMAX showtimes** for a complete run, and disable **Print Telegram messages without sending them** only after configuring the Telegram repository secrets.
+
+Scheduled checks will be enabled after the GitHub-hosted headed-browser flow passes repeated complete runs.

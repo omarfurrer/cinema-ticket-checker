@@ -10,12 +10,17 @@ import {
 } from "./config.mjs";
 
 const REQUEST_TIMEOUT_MS = Number(process.env.REQUEST_TIMEOUT_MS ?? 35_000);
-const BOOKING_TIMEOUT_MS = Number(process.env.BOOKING_TIMEOUT_MS ?? 10_000);
+const BOOKING_TIMEOUT_MS = Number(process.env.BOOKING_TIMEOUT_MS ?? 45_000);
+const BOOKING_ATTEMPTS = Number(process.env.BOOKING_ATTEMPTS ?? 2);
+const GUEST_SETTLE_MS = Number(process.env.GUEST_SETTLE_MS ?? 5_000);
 const DRY_RUN = process.env.DRY_RUN === "1";
 const HEADLESS = process.env.HEADLESS !== "0";
 const BROWSER_CHANNEL = process.env.BROWSER_CHANNEL?.trim() || undefined;
 const BROWSER_USER_AGENT =
   process.env.BROWSER_USER_AGENT?.trim() || undefined;
+const CHECK_TARGET = process.env.CHECK_TARGET?.trim() || undefined;
+const CHECK_LIMIT = parseCheckLimit(process.env.CHECK_LIMIT);
+const LIMITED_PROBE = Boolean(CHECK_TARGET || CHECK_LIMIT);
 const FETCH_USER_AGENT =
   BROWSER_USER_AGENT ??
   "vox-ticket-watcher/1.0 (+read-only availability monitoring; no automated booking)";
@@ -23,7 +28,11 @@ const FETCH_USER_AGENT =
 function browserLaunchOptions() {
   return {
     headless: HEADLESS,
-    args: ["--disable-dev-shm-usage"],
+    args: [
+      "--disable-blink-features=AutomationControlled",
+      "--disable-dev-shm-usage",
+    ],
+    ignoreDefaultArgs: ["--enable-automation"],
     ...(BROWSER_CHANNEL ? { channel: BROWSER_CHANNEL } : {}),
   };
 }
@@ -36,8 +45,32 @@ function browserContextOptions() {
   };
 }
 
+async function createBrowserContext(browser) {
+  const context = await browser.newContext(browserContextOptions());
+  await context.addInitScript(() => {
+    Object.defineProperty(Navigator.prototype, "webdriver", {
+      configurable: true,
+      get: () => undefined,
+    });
+  });
+  return context;
+}
+
 function normalize(value) {
   return value.trim().replace(/\s+/g, " ").toUpperCase();
+}
+
+function parseCheckLimit(value) {
+  if (value === undefined || value.trim() === "") {
+    return undefined;
+  }
+
+  const limit = Number(value);
+  if (!Number.isInteger(limit) || limit <= 0) {
+    throw new Error("CHECK_LIMIT must be a positive integer");
+  }
+
+  return limit;
 }
 
 function hasMovie(movie, target) {
@@ -107,7 +140,7 @@ async function loadPageWithNodeFetch(page, url) {
   });
 }
 
-async function openPage(page, url) {
+async function openShowtimesPage(page, url) {
   try {
     await page.goto(url, {
       waitUntil: "domcontentloaded",
@@ -124,18 +157,90 @@ async function openPage(page, url) {
     await loadPageWithNodeFetch(page, url);
   }
 
-  await page.waitForTimeout(700);
+  await waitForMovieCards(page);
 }
 
-async function discoverDatePages(page, todayKey) {
-  const baseUrl = showtimesUrl();
-  await openPage(page, baseUrl.href);
-  await waitForMovieCards(page);
-
-  const dateKeys = new Set([todayKey]);
-  const hrefs = await page.locator("a[href]").evaluateAll((anchors) =>
-    anchors.map((anchor) => anchor.href),
+function isPageCrashError(error) {
+  return /Page crashed|Target page, context or browser has been closed/i.test(
+    error instanceof Error ? error.message : String(error),
   );
+}
+
+function collectListingDiagnostics(page) {
+  const events = [];
+  let crashed = false;
+  const add = (message) => {
+    events.push(message);
+    if (events.length > 8) {
+      events.shift();
+    }
+  };
+
+  page.on("crash", () => {
+    crashed = true;
+    add("PAGE CRASHED");
+  });
+  page.on("response", (response) => {
+    if (response.request().resourceType() === "document") {
+      add(`HTTP ${response.status()} ${bookingPath(response.url())}`);
+    }
+  });
+  page.on("requestfailed", (request) => {
+    if (request.resourceType() === "document") {
+      add(
+        `FAILED ${bookingPath(request.url())}: ${
+          request.failure()?.errorText ?? "unknown network error"
+        }`,
+      );
+    }
+  });
+  page.on("pageerror", (error) => add(`PAGE ERROR: ${errorMessage(error)}`));
+
+  return {
+    didCrash: () => crashed,
+    summary: () => events.join("; "),
+  };
+}
+
+async function withFreshListingPage(context, action) {
+  const maxAttempts = 2;
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    const page = await context.newPage();
+    const diagnostics = collectListingDiagnostics(page);
+
+    try {
+      return await action(page);
+    } catch (error) {
+      const crashed = diagnostics.didCrash() || isPageCrashError(error);
+      if (crashed && attempt < maxAttempts) {
+        console.warn("VOX listing page crashed; retrying with a fresh page");
+        continue;
+      }
+
+      const summary = diagnostics.summary();
+      const message = error instanceof Error ? error.message : String(error);
+      throw new Error(
+        summary ? `Listing network: ${summary}. ${message}` : message,
+        { cause: error },
+      );
+    } finally {
+      await page.close().catch(() => {});
+    }
+  }
+
+  throw new Error("VOX listing page retry unexpectedly exhausted");
+}
+
+async function discoverDatePages(context, todayKey) {
+  const baseUrl = showtimesUrl();
+  const hrefs = await withFreshListingPage(context, async (page) => {
+    await openShowtimesPage(page, baseUrl.href);
+    return page.locator("a[href]").evaluateAll((anchors) =>
+      anchors.map((anchor) => anchor.href),
+    );
+  });
+  const dateKeys = new Set([todayKey]);
 
   for (const href of hrefs) {
     try {
@@ -184,15 +289,16 @@ async function extractMovieShowtimes(page) {
   );
 }
 
-async function collectEligibleShowtimes(page, dates) {
+async function collectEligibleShowtimes(context, dates) {
   const eligible = [];
   const errors = [];
 
   for (const date of dates) {
     try {
-      await openPage(page, date.url);
-      await waitForMovieCards(page);
-      const movies = await extractMovieShowtimes(page);
+      const movies = await withFreshListingPage(context, async (page) => {
+        await openShowtimesPage(page, date.url);
+        return extractMovieShowtimes(page);
+      });
 
       for (const target of CONFIG.targets) {
         const movie = movies.find((candidate) => hasMovie(candidate, target));
@@ -243,42 +349,133 @@ async function collectEligibleShowtimes(page, dates) {
   return { eligible, errors };
 }
 
-async function maybeContinueAsGuest(page) {
-  const seats = page.locator('input[name="seat"]');
-  try {
-    await seats.first().waitFor({
-      state: "attached",
-      timeout: Math.min(3_000, BOOKING_TIMEOUT_MS),
-    });
-    return;
-  } catch {
-    // VOX may first show /guest/processing before rendering the guest link.
+function filterEligibleShowtimes(eligible) {
+  let filtered = eligible;
+
+  if (CHECK_TARGET) {
+    if (!CONFIG.targets.some((target) => target.id === CHECK_TARGET)) {
+      throw new Error(`Unknown CHECK_TARGET: ${CHECK_TARGET}`);
+    }
+    filtered = filtered.filter(
+      (showtime) => showtime.target.id === CHECK_TARGET,
+    );
   }
 
-  const guestButton = page.getByText(/Continue\s+as\s+Guest/i).first();
-  await guestButton.waitFor({
-    state: "visible",
-    timeout: BOOKING_TIMEOUT_MS,
-  });
-  // Trigger the normal link navigation without making Playwright wait for
-  // VOX's booking response to finish streaming.
-  await guestButton.evaluate((element) => element.click());
-  await seats.first().waitFor({
-    state: "attached",
-    timeout: BOOKING_TIMEOUT_MS,
-  });
+  return CHECK_LIMIT ? filtered.slice(0, CHECK_LIMIT) : filtered;
 }
 
-async function maybeAcceptConsent(page) {
-  const agreeLink = page
-    .locator('a[data-dismiss="true"]')
-    .filter({ hasText: /I Agree/i })
-    .first();
+const BOOKING_STATE = Object.freeze({
+  guest: "guest",
+  processing: "processing",
+  consent: "consent",
+  seats: "seats",
+});
 
-  if ((await agreeLink.count()) > 0 && (await agreeLink.isVisible())) {
-    await agreeLink.click();
-    await page.waitForTimeout(300);
+async function waitForBookingState(page, ignoredState, timeout) {
+  const handle = await page.waitForFunction(
+    ({ states, ignored }) => {
+      const isVisible = (element) => {
+        const style = window.getComputedStyle(element);
+        const bounds = element.getBoundingClientRect();
+        return (
+          style.display !== "none" &&
+          style.visibility !== "hidden" &&
+          Number(style.opacity) !== 0 &&
+          bounds.width > 0 &&
+          bounds.height > 0
+        );
+      };
+      const hasVisibleControl = (pattern) =>
+        [...document.querySelectorAll("a, button")].some(
+          (element) =>
+            isVisible(element) && pattern.test(element.textContent?.trim() ?? ""),
+        );
+
+      let state = null;
+      if (hasVisibleControl(/^I\s+Agree$/i)) {
+        state = states.consent;
+      } else if (
+        /Retrieving\s+Seating\s+Plan/i.test(document.body?.innerText ?? "") ||
+        window.location.pathname.endsWith("/processing")
+      ) {
+        state = states.processing;
+      } else if (hasVisibleControl(/^Continue\s+as\s+Guest$/i)) {
+        state = states.guest;
+      } else if (document.querySelector('input[name="seat"]')) {
+        state = states.seats;
+      }
+
+      return state && state !== ignored ? state : null;
+    },
+    { states: BOOKING_STATE, ignored: ignoredState },
+    { timeout },
+  );
+
+  return handle.jsonValue();
+}
+
+async function clickVisibleBookingControl(page, text) {
+  const controls = page.locator("a, button").filter({ hasText: text });
+  const count = await controls.count();
+
+  for (let index = 0; index < count; index += 1) {
+    const control = controls.nth(index);
+    if (await control.isVisible()) {
+      await control.click({ timeout: BOOKING_TIMEOUT_MS });
+      return;
+    }
   }
+
+  throw new Error(`Booking control disappeared before it could be clicked: ${text}`);
+}
+
+async function driveBookingToSeats(page) {
+  const deadline = Date.now() + BOOKING_TIMEOUT_MS;
+  const transitions = [];
+  let consentAccepted = false;
+  let ignoredState = null;
+
+  while (Date.now() < deadline) {
+    const remaining = deadline - Date.now();
+    let state;
+    try {
+      state = await waitForBookingState(page, ignoredState, remaining);
+    } catch (error) {
+      const observed = transitions.length > 0 ? transitions.join(" -> ") : "none";
+      throw new Error(
+        `Booking did not reach the seat map. Observed states: ${observed}. Final URL: ${bookingPath(page.url())}`,
+        { cause: error },
+      );
+    }
+
+    transitions.push(state);
+    if (state === BOOKING_STATE.seats) {
+      if (consentAccepted) {
+        return transitions;
+      }
+
+      // VOX inserts the seat inputs shortly before displaying its mandatory
+      // conditions modal. Do not treat that early DOM as a completed flow.
+      ignoredState = state;
+      continue;
+    }
+
+    if (state === BOOKING_STATE.guest) {
+      // Give VOX time to finish initializing the generated booking session
+      // before requesting its seat plan, matching the reliable manual flow.
+      await page.waitForTimeout(GUEST_SETTLE_MS);
+      await clickVisibleBookingControl(page, /^Continue\s+as\s+Guest$/i);
+    } else if (state === BOOKING_STATE.consent) {
+      await clickVisibleBookingControl(page, /^I\s+Agree$/i);
+      consentAccepted = true;
+    }
+
+    ignoredState = state;
+  }
+
+  throw new Error(
+    `Booking state deadline expired. Observed states: ${transitions.join(" -> ")}`,
+  );
 }
 
 async function readSeatLabels(page) {
@@ -328,13 +525,19 @@ function collectBookingNetworkDiagnostics(page) {
 
   page.on("response", (response) => {
     const request = response.request();
-    if (request.resourceType() === "document") {
+    if (
+      request.resourceType() === "document" &&
+      response.frame() === page.mainFrame()
+    ) {
       add(`HTTP ${response.status()} ${bookingPath(response.url())}`);
     }
   });
 
   page.on("requestfailed", (request) => {
-    if (request.resourceType() === "document") {
+    if (
+      request.resourceType() === "document" &&
+      request.frame() === page.mainFrame()
+    ) {
       add(
         `FAILED ${bookingPath(request.url())}: ${
           request.failure()?.errorText ?? "unknown network error"
@@ -346,37 +549,114 @@ function collectBookingNetworkDiagnostics(page) {
   return () => events.join("; ");
 }
 
-async function readBookingSeatLabelsWithContext(context, showtime) {
-  const page = await context.newPage();
-  const networkSummary = collectBookingNetworkDiagnostics(page);
-
-  try {
-    await page.goto(showtime.bookingUrl, {
-      waitUntil: "commit",
-      timeout: BOOKING_TIMEOUT_MS,
-      referer: showtime.sourceUrl,
-    });
-    await page.waitForLoadState("domcontentloaded", {
-      timeout: BOOKING_TIMEOUT_MS,
-    }).catch(() => {});
-    await maybeAcceptConsent(page);
-    await maybeContinueAsGuest(page);
-    await maybeAcceptConsent(page);
-    return await readSeatLabels(page);
-  } catch (error) {
-    const summary = networkSummary();
-    const message = error instanceof Error ? error.message : String(error);
-    throw new Error(
-      summary ? `Booking network: ${summary}. ${message}` : message,
-      { cause: error },
-    );
-  } finally {
-    await page.close().catch(() => {});
-  }
+function showtimeDescription(showtime) {
+  return `${showtime.dateLabel} | ${showtime.target.movieName} | ${showtime.timeText}`;
 }
 
-async function checkSeats(context, showtime) {
-  const seats = await readBookingSeatLabelsWithContext(context, showtime);
+async function findBookingLink(page, showtime) {
+  const links = page.locator("a.action.showtime");
+  const hrefs = await links.evaluateAll((anchors) =>
+    anchors.map((anchor) => anchor.href),
+  );
+  const targetPath = bookingPath(showtime.bookingUrl);
+  const index = hrefs.findIndex((href) => bookingPath(href) === targetPath);
+
+  if (index < 0) {
+    throw new Error(`Showtime link disappeared from ${bookingPath(showtime.sourceUrl)}`);
+  }
+
+  return links.nth(index);
+}
+
+function isBookingUrl(url) {
+  return url.origin === CONFIG.origin && url.pathname.startsWith("/booking/");
+}
+
+async function clickShowtimeAndGetBookingPage(context, showtimesPage, link) {
+  const destination = Promise.any([
+    context.waitForEvent("page", { timeout: BOOKING_TIMEOUT_MS }),
+    showtimesPage
+      .waitForURL(isBookingUrl, {
+        waitUntil: "commit",
+        timeout: BOOKING_TIMEOUT_MS,
+      })
+      .then(() => showtimesPage),
+  ]);
+
+  await link.click({ noWaitAfter: true, timeout: BOOKING_TIMEOUT_MS });
+  const bookingPage = await destination;
+  await bookingPage.waitForURL(isBookingUrl, {
+    waitUntil: "commit",
+    timeout: BOOKING_TIMEOUT_MS,
+  });
+  return bookingPage;
+}
+
+async function readBookingSeatLabels(showtime) {
+  const attemptErrors = [];
+
+  for (let attempt = 1; attempt <= BOOKING_ATTEMPTS; attempt += 1) {
+    let browser;
+    let context;
+    let networkSummary = () => "";
+
+    try {
+      // A new context isolates cookies, but Chromium still reuses the browser's
+      // HTTP/2 connection pool. Launching a fresh process also resets the
+      // transport state that VOX intermittently leaves stalled.
+      browser = await chromium.launch(browserLaunchOptions());
+      context = await createBrowserContext(browser);
+      const showtimesPage = await context.newPage();
+      const networkSummaries = [collectBookingNetworkDiagnostics(showtimesPage)];
+      networkSummary = () =>
+        networkSummaries.map((summary) => summary()).filter(Boolean).join("; ");
+
+      await openShowtimesPage(showtimesPage, showtime.sourceUrl);
+      const bookingLink = await findBookingLink(showtimesPage, showtime);
+      await bookingLink.waitFor({ state: "visible", timeout: REQUEST_TIMEOUT_MS });
+      const bookingPage = await clickShowtimeAndGetBookingPage(
+        context,
+        showtimesPage,
+        bookingLink,
+      );
+      if (bookingPage !== showtimesPage) {
+        networkSummaries.push(collectBookingNetworkDiagnostics(bookingPage));
+      }
+      const transitions = await driveBookingToSeats(bookingPage);
+      const seats = await readSeatLabels(bookingPage);
+      console.log(
+        `[booking] ${showtimeDescription(showtime)} | ${transitions.join(" -> ")} | ${seats.length} seats`,
+      );
+      return seats;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      const summary = networkSummary();
+      const detail = summary ? `${message}. Booking network: ${summary}` : message;
+      attemptErrors.push(`attempt ${attempt}: ${detail}`);
+      console.warn(
+        `[booking] ${showtimeDescription(showtime)} | attempt ${attempt} failed: ${errorMessage(detail)}`,
+      );
+
+      if (attempt < BOOKING_ATTEMPTS) {
+        console.warn(
+          `[booking] ${showtimeDescription(showtime)} | retrying in a clean browser`,
+        );
+      }
+    } finally {
+      if (context) {
+        await context.close().catch(() => {});
+      }
+      if (browser) {
+        await browser.close().catch(() => {});
+      }
+    }
+  }
+
+  throw new Error(attemptErrors.join(" | "));
+}
+
+async function checkSeats(showtime) {
+  const seats = await readBookingSeatLabels(showtime);
   const availableLabels = new Set(
     seats.filter((seat) => seat.available).map((seat) => seat.label),
   );
@@ -394,17 +674,17 @@ async function checkSeats(context, showtime) {
 
 function errorMessage(error) {
   if (error instanceof Error) {
-    return error.message.replace(/\s+/g, " ").slice(0, 240);
+    return error.message.replace(/\s+/g, " ").slice(0, 800);
   }
-  return String(error).replace(/\s+/g, " ").slice(0, 240);
+  return String(error).replace(/\s+/g, " ").slice(0, 800);
 }
 
-async function inspectEligibleShowtimes(context, eligible, initialErrors) {
+async function inspectEligibleShowtimes(eligible, initialErrors) {
   const results = [];
   const errors = [...initialErrors];
   for (const showtime of eligible) {
     try {
-      results.push(await checkSeats(context, showtime));
+      results.push(await checkSeats(showtime));
     } catch (error) {
       errors.push({
         stage: "seats",
@@ -432,14 +712,28 @@ function resultLine(result) {
 
 function buildHeartbeat(report) {
   const lines = [
-    "🔵 VOX CHECK COMPLETED",
+    LIMITED_PROBE ? "🧪 VOX LIMITED PROBE COMPLETED" : "🔵 VOX CHECK COMPLETED",
     `${formatCairoNow()} | ${CONFIG.cinema}`,
     `Dates scanned: ${report.dates.length}`,
     `Eligible showtimes checked: ${report.results.length}/${report.eligible.length}`,
-    "",
   ];
 
-  for (const target of CONFIG.targets) {
+  if (LIMITED_PROBE) {
+    const filters = [
+      CHECK_TARGET ? `target=${CHECK_TARGET}` : null,
+      CHECK_LIMIT ? `limit=${CHECK_LIMIT}` : null,
+    ].filter(Boolean);
+    lines.push(`Probe filter: ${filters.join(", ")}`);
+    lines.push(
+      `Eligible showtimes selected: ${report.eligible.length}/${report.discoveredEligible}`,
+    );
+  }
+  lines.push("");
+
+  const displayedTargets = CHECK_TARGET
+    ? CONFIG.targets.filter((target) => target.id === CHECK_TARGET)
+    : CONFIG.targets;
+  for (const target of displayedTargets) {
     lines.push(`${target.movieName} - ${target.format}`);
     const targetResults = resultsForTarget(report, target.id);
     const targetEligible = report.eligible.filter(
@@ -481,7 +775,9 @@ function buildAvailabilityAlert(report) {
   }
 
   const lines = [
-    "🚨 VOX SEATS AVAILABLE",
+    LIMITED_PROBE
+      ? "🚨 VOX SEATS AVAILABLE (LIMITED PROBE)"
+      : "🚨 VOX SEATS AVAILABLE",
     `${formatCairoNow()} | ${CONFIG.cinema}`,
     "",
   ];
@@ -551,25 +847,36 @@ async function main() {
   let report = {
     dates: [],
     eligible: [],
+    discoveredEligible: 0,
     results: [],
     errors: [],
   };
 
   try {
     listingBrowser = await chromium.launch(browserLaunchOptions());
-    listingContext = await listingBrowser.newContext(browserContextOptions());
-    const listingPage = await listingContext.newPage();
-    const dates = await discoverDatePages(listingPage, todayKey);
+    listingContext = await createBrowserContext(listingBrowser);
+    const dates = await discoverDatePages(listingContext, todayKey);
     const { eligible, errors: showtimeErrors } =
-      await collectEligibleShowtimes(listingPage, dates);
+      await collectEligibleShowtimes(listingContext, dates);
+    const selectedShowtimes = filterEligibleShowtimes(eligible);
+
+    await listingContext.close();
+    listingContext = undefined;
+    await listingBrowser.close();
+    listingBrowser = undefined;
 
     const { results, errors: seatErrors } = await inspectEligibleShowtimes(
-      listingContext,
-      eligible,
+      selectedShowtimes,
       showtimeErrors,
     );
 
-    report = { dates, eligible, results, errors: seatErrors };
+    report = {
+      dates,
+      eligible: selectedShowtimes,
+      discoveredEligible: eligible.length,
+      results,
+      errors: seatErrors,
+    };
   } catch (error) {
     report.errors.push({ stage: "run", message: errorMessage(error) });
   } finally {
@@ -599,6 +906,7 @@ async function main() {
       {
         datesScanned: report.dates.length,
         eligibleShowtimes: report.eligible.length,
+        discoveredEligibleShowtimes: report.discoveredEligible,
         checkedShowtimes: report.results.length,
         matches: report.results.filter((result) => result.availablePairs.length)
           .length,
@@ -606,6 +914,7 @@ async function main() {
         dryRun: DRY_RUN,
         browserChannel: BROWSER_CHANNEL ?? "bundled-chromium",
         browserMode: HEADLESS ? "headless" : "headed",
+        limitedProbe: LIMITED_PROBE,
       },
       null,
       2,

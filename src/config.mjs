@@ -1,7 +1,6 @@
 export const CONFIG = Object.freeze({
   origin: "https://egy.voxcinemas.com",
-  showtimesPath:
-    "/showtimes?c=city-centre-almaza&m=spider-man-brand-new-day&m=the-odyssey",
+  showtimesPath: "/showtimes?c=city-centre-almaza",
   cinema: "City Centre Almaza",
   timeZone: "Africa/Cairo",
   earliestStartMinutes: 19 * 60,
@@ -110,4 +109,3 @@ export function parseTimeToMinutes(timeText) {
 
   return twentyFourHour * 60 + minute;
 }
-
