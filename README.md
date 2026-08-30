@@ -2,7 +2,7 @@
 
 This read-only checker scans the VOX Cinemas Egypt showtimes exposed for City Centre Almaza, then inspects the booking seat map without selecting or purchasing anything.
 
-It checks every date currently exposed by the VOX showtimes page and only follows showtimes starting at or after 7:00pm.
+It checks every date currently exposed by the VOX showtimes page and only follows showtimes starting at or after 7:00pm with at least 60 minutes remaining before they start.
 
 ## Current preferences
 

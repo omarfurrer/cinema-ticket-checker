@@ -1,9 +1,11 @@
 import { chromium } from "playwright";
 import {
   cairoDateKey,
+  cairoMinutesSinceMidnight,
   CONFIG,
   formatCairoNow,
   formatDateKey,
+  hasMinimumLeadTime,
   parseTimeToMinutes,
   showtimesUrl,
   urlForDate,
@@ -349,19 +351,41 @@ async function collectEligibleShowtimes(context, dates) {
   return { eligible, errors };
 }
 
-function filterEligibleShowtimes(eligible) {
-  let filtered = eligible;
-
+function filterByCheckTarget(showtimes) {
   if (CHECK_TARGET) {
     if (!CONFIG.targets.some((target) => target.id === CHECK_TARGET)) {
       throw new Error(`Unknown CHECK_TARGET: ${CHECK_TARGET}`);
     }
-    filtered = filtered.filter(
+    return showtimes.filter(
       (showtime) => showtime.target.id === CHECK_TARGET,
     );
   }
 
-  return CHECK_LIMIT ? filtered.slice(0, CHECK_LIMIT) : filtered;
+  return showtimes;
+}
+
+function partitionByLeadTime(eligible, now = new Date()) {
+  const todayKey = cairoDateKey(now);
+  const nowMinutes = cairoMinutesSinceMidnight(now);
+  const actionable = [];
+  const skipped = [];
+
+  for (const showtime of eligible) {
+    const minutesUntilStart =
+      showtime.dateKey === todayKey
+        ? showtime.timeMinutes - nowMinutes
+        : showtime.dateKey > todayKey
+          ? Number.POSITIVE_INFINITY
+          : Number.NEGATIVE_INFINITY;
+
+    if (!hasMinimumLeadTime(showtime.dateKey, showtime.timeMinutes, now)) {
+      skipped.push({ ...showtime, minutesUntilStart });
+    } else {
+      actionable.push(showtime);
+    }
+  }
+
+  return { actionable, skipped };
 }
 
 const BOOKING_STATE = Object.freeze({
@@ -725,8 +749,18 @@ function buildHeartbeat(report) {
     ].filter(Boolean);
     lines.push(`Probe filter: ${filters.join(", ")}`);
     lines.push(
-      `Eligible showtimes selected: ${report.eligible.length}/${report.discoveredEligible}`,
+      `Eligible showtimes selected: ${report.eligible.length}/${report.actionableEligible}`,
     );
+  }
+  if (report.skipped.length > 0) {
+    lines.push(
+      `Skipped for lead time: ${report.skipped.length} (minimum ${CONFIG.minimumLeadMinutes} minutes)`,
+    );
+    for (const showtime of report.skipped.slice(0, 5)) {
+      lines.push(
+        `- ${showtime.dateLabel} | ${showtime.timeText} | ${showtime.target.movieName}`,
+      );
+    }
   }
   lines.push("");
 
@@ -739,12 +773,19 @@ function buildHeartbeat(report) {
     const targetEligible = report.eligible.filter(
       (showtime) => showtime.target.id === target.id,
     );
+    const targetSkipped = report.skipped.filter(
+      (showtime) => showtime.target.id === target.id,
+    );
     if (targetResults.length > 0) {
       lines.push(...targetResults.map(resultLine));
     } else if (targetEligible.length > 0) {
       lines.push("- Eligible showtimes found, but no seat results returned");
     } else if (report.dates.length === 0) {
       lines.push("- No result - showtimes page was not scanned");
+    } else if (targetSkipped.length > 0) {
+      lines.push(
+        `- No actionable showtimes; ${targetSkipped.length} start within ${CONFIG.minimumLeadMinutes} minutes`,
+      );
     } else {
       lines.push("- No showtimes at or after 7:00pm found");
     }
@@ -848,6 +889,8 @@ async function main() {
     dates: [],
     eligible: [],
     discoveredEligible: 0,
+    actionableEligible: 0,
+    skipped: [],
     results: [],
     errors: [],
   };
@@ -858,7 +901,12 @@ async function main() {
     const dates = await discoverDatePages(listingContext, todayKey);
     const { eligible, errors: showtimeErrors } =
       await collectEligibleShowtimes(listingContext, dates);
-    const selectedShowtimes = filterEligibleShowtimes(eligible);
+    const { actionable, skipped } = partitionByLeadTime(eligible);
+    const targetActionable = filterByCheckTarget(actionable);
+    const selectedShowtimes = CHECK_LIMIT
+      ? targetActionable.slice(0, CHECK_LIMIT)
+      : targetActionable;
+    const relevantSkipped = filterByCheckTarget(skipped);
 
     await listingContext.close();
     listingContext = undefined;
@@ -874,6 +922,8 @@ async function main() {
       dates,
       eligible: selectedShowtimes,
       discoveredEligible: eligible.length,
+      actionableEligible: targetActionable.length,
+      skipped: relevantSkipped,
       results,
       errors: seatErrors,
     };
@@ -907,6 +957,9 @@ async function main() {
         datesScanned: report.dates.length,
         eligibleShowtimes: report.eligible.length,
         discoveredEligibleShowtimes: report.discoveredEligible,
+        actionableEligibleShowtimes: report.actionableEligible,
+        skippedShowtimes: report.skipped.length,
+        minimumLeadMinutes: CONFIG.minimumLeadMinutes,
         checkedShowtimes: report.results.length,
         matches: report.results.filter((result) => result.availablePairs.length)
           .length,

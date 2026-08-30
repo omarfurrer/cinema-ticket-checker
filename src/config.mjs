@@ -4,6 +4,7 @@ export const CONFIG = Object.freeze({
   cinema: "City Centre Almaza",
   timeZone: "Africa/Cairo",
   earliestStartMinutes: 19 * 60,
+  minimumLeadMinutes: 60,
   targets: Object.freeze([
     Object.freeze({
       id: "spider-man-gold",
@@ -81,6 +82,33 @@ export function formatCairoNow(date = new Date()) {
     dateStyle: "medium",
     timeStyle: "short",
   }).format(date);
+}
+
+export function cairoMinutesSinceMidnight(date = new Date()) {
+  const parts = new Intl.DateTimeFormat("en-GB", {
+    timeZone: CONFIG.timeZone,
+    hour: "2-digit",
+    minute: "2-digit",
+    hourCycle: "h23",
+  }).formatToParts(date);
+  const values = Object.fromEntries(
+    parts
+      .filter(({ type }) => type !== "literal")
+      .map(({ type, value }) => [type, value]),
+  );
+
+  return Number(values.hour) * 60 + Number(values.minute);
+}
+
+export function hasMinimumLeadTime(dateKey, timeMinutes, date = new Date()) {
+  const todayKey = cairoDateKey(date);
+  if (dateKey !== todayKey) {
+    return dateKey > todayKey;
+  }
+
+  return (
+    timeMinutes - cairoMinutesSinceMidnight(date) >= CONFIG.minimumLeadMinutes
+  );
 }
 
 export function parseTimeToMinutes(timeText) {
