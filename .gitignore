@@ -1,4 +1,6 @@
 node_modules/
 npm-debug.log*
 .env
+.dev.vars
+.wrangler/
 .DS_Store

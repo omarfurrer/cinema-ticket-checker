@@ -28,11 +28,15 @@ The seat groups live in `src/config.mjs` so they can be updated without changing
 
 The checker sends a quiet blue `VOX CHECK COMPLETED` message after every run. When one or more preferred pairs are available, it also sends a separate audible `VOX SEATS AVAILABLE` alert with the booking link. Availability alerts repeat while a preferred pair remains available, so a short-lived opening is harder to miss.
 
-## Hosting limitation
+## Hosting
 
-The complete booking flow works locally in headed Google Chrome. GitHub-hosted headed Chrome under Xvfb is still experimental because the runner uses Linux and a datacenter network. Scheduled checks remain paused until repeated manual workflow runs confirm that seat maps load reliably.
+The complete booking flow works locally in headed Google Chrome and on a GitHub-hosted Linux runner using headed Chrome under Xvfb.
+
+A Cloudflare Worker named `vox-seat-check-scheduler` is the production clock. Every five minutes it dispatches a complete, real GitHub Actions check. GitHub's native scheduled trigger is intentionally not used because it did not enqueue runs reliably for this repository.
 
 ## Local run
+
+Node.js 22 or newer is required.
 
 ```bash
 npm install
@@ -60,6 +64,33 @@ The output identifies this as a limited probe. Runs without these variables stil
 
 ## GitHub Actions
 
-The workflow currently runs manually from the Actions tab. Its defaults perform a dry two-showtime Odyssey IMAX probe, so no Telegram message is sent. Disable **Check only two Odyssey IMAX showtimes** for a complete run, and disable **Print Telegram messages without sending them** only after configuring the Telegram repository secrets.
+The Cloudflare Worker invokes `.github/workflows/check.yml` with both `limited_probe` and `dry_run` disabled. This inspects every eligible showtime and sends the Telegram heartbeat.
 
-Scheduled checks will be enabled after the GitHub-hosted headed-browser flow passes repeated complete runs.
+The workflow can also be started manually from the Actions tab. Its manual defaults perform a dry two-showtime Odyssey IMAX probe, so no Telegram message is sent. Disable **Check only two Odyssey IMAX showtimes** for a complete run, and disable **Print Telegram messages without sending them** only after configuring the Telegram repository secrets.
+
+The workflow intentionally has no GitHub `schedule` trigger. Cloudflare is the only recurring scheduler, which prevents duplicate checks and duplicate Telegram heartbeats.
+
+## Cloudflare scheduler
+
+The Worker source and configuration live under `scheduler/`. It sends a GitHub workflow dispatch request and never handles VOX or Telegram credentials.
+
+The Worker requires a Cloudflare secret named `GITHUB_TOKEN`. Use a fine-grained GitHub token restricted to this repository with Actions read and write permission. Never put the token in source control or `scheduler/wrangler.jsonc`.
+
+Validate the Worker locally without deploying it:
+
+```bash
+npm run test:scheduler
+npm run check:scheduler
+```
+
+Deploy the existing Worker after validation:
+
+```bash
+npm run deploy:scheduler
+```
+
+Wrangler verifies that the required `GITHUB_TOKEN` secret already exists before deployment. If the secret needs to be replaced, set it interactively so it is not written to disk:
+
+```bash
+npx wrangler secret put GITHUB_TOKEN --config scheduler/wrangler.jsonc
+```

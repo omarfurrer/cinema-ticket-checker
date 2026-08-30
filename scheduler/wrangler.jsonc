@@ -1,0 +1,28 @@
+{
+  "$schema": "../node_modules/wrangler/config-schema.json",
+  "name": "vox-seat-check-scheduler",
+  "main": "src/index.js",
+  "compatibility_date": "2026-08-30",
+  "compatibility_flags": ["nodejs_compat"],
+  "workers_dev": false,
+  "vars": {
+    "GITHUB_OWNER": "omarfurrer",
+    "GITHUB_REPOSITORY": "cinema-ticket-checker",
+    "GITHUB_WORKFLOW": "check.yml",
+    "GITHUB_REF": "main"
+  },
+  "secrets": {
+    "required": ["GITHUB_TOKEN"]
+  },
+  "triggers": {
+    "crons": ["*/5 * * * *"]
+  },
+  "observability": {
+    "enabled": true,
+    "logs": {
+      "enabled": true,
+      "head_sampling_rate": 1,
+      "invocation_logs": true
+    }
+  }
+}
