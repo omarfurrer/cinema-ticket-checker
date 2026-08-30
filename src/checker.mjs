@@ -378,36 +378,13 @@ function errorMessage(error) {
   return String(error).replace(/\s+/g, " ").slice(0, 240);
 }
 
-async function inspectEligibleShowtimes(
-  context,
-  http1Context,
-  eligible,
-  initialErrors,
-) {
+async function inspectEligibleShowtimes(context, eligible, initialErrors) {
   const results = [];
   const errors = [...initialErrors];
   for (const showtime of eligible) {
     try {
       results.push(await checkSeats(context, showtime));
     } catch (error) {
-      if (http1Context && isTransportNavigationError(error)) {
-        try {
-          results.push(await checkSeats(http1Context, showtime));
-          continue;
-        } catch (http1Error) {
-          errors.push({
-            stage: "seats",
-            date: showtime.dateLabel,
-            movie: showtime.target.movieName,
-            time: showtime.timeText,
-            message: `Primary: ${errorMessage(error)} | HTTP/1.1 retry: ${errorMessage(
-              http1Error,
-            )}`,
-          });
-          continue;
-        }
-      }
-
       errors.push({
         stage: "seats",
         date: showtime.dateLabel,
@@ -550,8 +527,6 @@ async function main() {
   const todayKey = cairoDateKey();
   let listingBrowser;
   let listingContext;
-  let http1Browser;
-  let http1Context;
   let report = {
     dates: [],
     eligible: [],
@@ -574,20 +549,8 @@ async function main() {
     const { eligible, errors: showtimeErrors } =
       await collectEligibleShowtimes(listingPage, dates);
 
-    http1Browser = await chromium.launch({
-      headless: true,
-      args: ["--disable-dev-shm-usage", "--disable-http2"],
-    });
-    http1Context = await http1Browser.newContext({
-      locale: "en-US",
-      timezoneId: CONFIG.timeZone,
-      userAgent: USER_AGENT,
-      storageState: await listingContext.storageState(),
-    });
-
     const { results, errors: seatErrors } = await inspectEligibleShowtimes(
       listingContext,
-      http1Context,
       eligible,
       showtimeErrors,
     );
@@ -596,12 +559,6 @@ async function main() {
   } catch (error) {
     report.errors.push({ stage: "run", message: errorMessage(error) });
   } finally {
-    if (http1Context) {
-      await http1Context.close();
-    }
-    if (http1Browser) {
-      await http1Browser.close();
-    }
     if (listingContext) {
       await listingContext.close();
     }
