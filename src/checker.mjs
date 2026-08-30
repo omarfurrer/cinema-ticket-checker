@@ -12,8 +12,29 @@ import {
 const REQUEST_TIMEOUT_MS = Number(process.env.REQUEST_TIMEOUT_MS ?? 35_000);
 const BOOKING_TIMEOUT_MS = Number(process.env.BOOKING_TIMEOUT_MS ?? 10_000);
 const DRY_RUN = process.env.DRY_RUN === "1";
-const USER_AGENT =
+const HEADLESS = process.env.HEADLESS !== "0";
+const BROWSER_CHANNEL = process.env.BROWSER_CHANNEL?.trim() || undefined;
+const BROWSER_USER_AGENT =
+  process.env.BROWSER_USER_AGENT?.trim() || undefined;
+const FETCH_USER_AGENT =
+  BROWSER_USER_AGENT ??
   "vox-ticket-watcher/1.0 (+read-only availability monitoring; no automated booking)";
+
+function browserLaunchOptions() {
+  return {
+    headless: HEADLESS,
+    args: ["--disable-dev-shm-usage"],
+    ...(BROWSER_CHANNEL ? { channel: BROWSER_CHANNEL } : {}),
+  };
+}
+
+function browserContextOptions() {
+  return {
+    locale: "en-US",
+    timezoneId: CONFIG.timeZone,
+    ...(BROWSER_USER_AGENT ? { userAgent: BROWSER_USER_AGENT } : {}),
+  };
+}
 
 function normalize(value) {
   return value.trim().replace(/\s+/g, " ").toUpperCase();
@@ -70,7 +91,7 @@ async function loadPageWithNodeFetch(page, url) {
   const response = await fetch(url, {
     headers: {
       accept: "text/html,application/xhtml+xml",
-      "user-agent": USER_AGENT,
+      "user-agent": FETCH_USER_AGENT,
     },
     redirect: "follow",
   });
@@ -535,15 +556,8 @@ async function main() {
   };
 
   try {
-    listingBrowser = await chromium.launch({
-      headless: true,
-      args: ["--disable-dev-shm-usage"],
-    });
-    listingContext = await listingBrowser.newContext({
-      locale: "en-US",
-      timezoneId: CONFIG.timeZone,
-      userAgent: USER_AGENT,
-    });
+    listingBrowser = await chromium.launch(browserLaunchOptions());
+    listingContext = await listingBrowser.newContext(browserContextOptions());
     const listingPage = await listingContext.newPage();
     const dates = await discoverDatePages(listingPage, todayKey);
     const { eligible, errors: showtimeErrors } =
@@ -590,6 +604,8 @@ async function main() {
           .length,
         errors: report.errors.length,
         dryRun: DRY_RUN,
+        browserChannel: BROWSER_CHANNEL ?? "bundled-chromium",
+        browserMode: HEADLESS ? "headless" : "headed",
       },
       null,
       2,
