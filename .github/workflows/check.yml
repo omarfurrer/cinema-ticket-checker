@@ -1,6 +1,8 @@
 name: Check VOX seat availability
 
 on:
+  schedule:
+    - cron: "2-57/5 * * * *"
   workflow_dispatch:
     inputs:
       limited_probe:
