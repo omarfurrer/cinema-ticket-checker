@@ -42,6 +42,14 @@ DRY_RUN=1 npm run check
 
 `DRY_RUN=1` prints both Telegram messages instead of sending them. A real run requires `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` in the environment.
 
+VOX currently rejects the automated Chromium connection in headless mode. On a Mac with Google Chrome installed, use visible Chrome for local checks:
+
+```bash
+BROWSER_CHANNEL=chrome HEADLESS=0 DRY_RUN=1 npm run check
+```
+
+The Chrome window must remain available while the check runs. `BROWSER_USER_AGENT` can optionally override Chrome's normal user-agent, but the default local configuration uses Chrome's own user-agent.
+
 ## GitHub Actions
 
 The workflow runs on a five-minute schedule and can also be started manually from the Actions tab. GitHub may delay scheduled jobs briefly during periods of high load.
