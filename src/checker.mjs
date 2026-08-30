@@ -193,6 +193,7 @@ async function collectEligibleShowtimes(page, dates) {
               target,
               dateKey: date.dateKey,
               dateLabel: date.label,
+              sourceUrl: date.url,
               movieTitle: movie.title || target.movieName,
               format: formatGroup.format,
               timeText: showtime.timeText,
@@ -286,17 +287,53 @@ async function readSeatLabels(page) {
   return records;
 }
 
-async function readBookingSeatLabelsWithBrowser(browser, url) {
-  const context = await browser.newContext({
-    locale: "en-US",
-    timezoneId: CONFIG.timeZone,
+function bookingPath(value) {
+  try {
+    const url = new URL(value);
+    return `${url.pathname}${url.search}`;
+  } catch {
+    return value;
+  }
+}
+
+function collectBookingNetworkDiagnostics(page) {
+  const events = [];
+  const add = (message) => {
+    events.push(message);
+    if (events.length > 8) {
+      events.shift();
+    }
+  };
+
+  page.on("response", (response) => {
+    const request = response.request();
+    if (request.resourceType() === "document") {
+      add(`HTTP ${response.status()} ${bookingPath(response.url())}`);
+    }
   });
+
+  page.on("requestfailed", (request) => {
+    if (request.resourceType() === "document") {
+      add(
+        `FAILED ${bookingPath(request.url())}: ${
+          request.failure()?.errorText ?? "unknown network error"
+        }`,
+      );
+    }
+  });
+
+  return () => events.join("; ");
+}
+
+async function readBookingSeatLabelsWithContext(context, showtime) {
   const page = await context.newPage();
+  const networkSummary = collectBookingNetworkDiagnostics(page);
 
   try {
-    await page.goto(url, {
+    await page.goto(showtime.bookingUrl, {
       waitUntil: "commit",
       timeout: BOOKING_TIMEOUT_MS,
+      referer: showtime.sourceUrl,
     });
     await page.waitForLoadState("domcontentloaded", {
       timeout: BOOKING_TIMEOUT_MS,
@@ -305,16 +342,20 @@ async function readBookingSeatLabelsWithBrowser(browser, url) {
     await maybeContinueAsGuest(page);
     await maybeAcceptConsent(page);
     return await readSeatLabels(page);
+  } catch (error) {
+    const summary = networkSummary();
+    const message = error instanceof Error ? error.message : String(error);
+    throw new Error(
+      summary ? `Booking network: ${summary}. ${message}` : message,
+      { cause: error },
+    );
   } finally {
-    await context.close();
+    await page.close().catch(() => {});
   }
 }
 
-async function checkSeats(browser, showtime) {
-  const seats = await readBookingSeatLabelsWithBrowser(
-    browser,
-    showtime.bookingUrl,
-  );
+async function checkSeats(context, showtime) {
+  const seats = await readBookingSeatLabelsWithContext(context, showtime);
   const availableLabels = new Set(
     seats.filter((seat) => seat.available).map((seat) => seat.label),
   );
@@ -337,12 +378,12 @@ function errorMessage(error) {
   return String(error).replace(/\s+/g, " ").slice(0, 240);
 }
 
-async function inspectEligibleShowtimes(browser, eligible, initialErrors) {
+async function inspectEligibleShowtimes(context, eligible, initialErrors) {
   const results = [];
   const errors = [...initialErrors];
   for (const showtime of eligible) {
     try {
-      results.push(await checkSeats(browser, showtime));
+      results.push(await checkSeats(context, showtime));
     } catch (error) {
       errors.push({
         stage: "seats",
@@ -509,7 +550,7 @@ async function main() {
       await collectEligibleShowtimes(listingPage, dates);
 
     const { results, errors: seatErrors } = await inspectEligibleShowtimes(
-      listingBrowser,
+      listingContext,
       eligible,
       showtimeErrors,
     );
