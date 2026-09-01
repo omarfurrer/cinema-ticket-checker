@@ -32,7 +32,7 @@ The checker sends a quiet blue `VOX CHECK COMPLETED` message after every run. Wh
 
 The complete booking flow works locally in headed Google Chrome and on a GitHub-hosted Linux runner using headed Chrome under Xvfb.
 
-A Cloudflare Worker named `vox-seat-check-scheduler` is the production clock. Every five minutes it dispatches a complete, real GitHub Actions check. GitHub's native scheduled trigger is intentionally not used because it did not enqueue runs reliably for this repository.
+A Cloudflare Worker named `vox-seat-check-scheduler` is the production clock. Every ten minutes it dispatches a complete, real GitHub Actions check. GitHub's native scheduled trigger is intentionally not used because it did not enqueue runs reliably for this repository.
 
 ## Local run
 
